@@ -2,4 +2,4 @@ fastapi
 uvicorn
 openai
 psycopg2-binary
-dotenv
+python-dotenv
