@@ -144,21 +144,28 @@ def generate_friendly_response(results, pergunta):
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "Você é um assistente amigável e informativo."},
-                {"role": "user", "content": f"A resposta para '{pergunta}' é {valor}. Crie uma resposta natural e amigável baseada nisso."}
+                {"role": "system", "content": "Você é um assistente amigável e informativo. Responda de forma natural, sem mencionar SQL, banco de dados, consultas ou listas pontuadas. Responda de forma fluida e conversacional."},
+                {"role": "user", "content": f"A resposta para '{pergunta}' é {valor}. Gere uma resposta natural e amigável, sem formato de lista."}
             ]
         )
         return response.choices[0].message.content.strip()
 
-    client = openai.OpenAI(api_key=OPENAI_API_KEY)
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "Você é um assistente amigável e informativo."},
-            {"role": "user", "content": f"Os resultados SQL foram: {results}. Resuma a resposta de forma natural e interativa."}
-        ]
-    )
-    return response.choices[0].message.content.strip()
+    # Se for uma lista de itens, formatamos como uma resposta mais fluida
+    if isinstance(results, list) and len(results) > 0:
+        valores = [str(row[0]) for row in results if len(row) > 0]
+        resposta_formatada = ", ".join(valores)
+
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Você é um assistente amigável e informativo. Responda de forma natural, sem mencionar SQL, banco de dados ou listas pontuadas. Dê um tom mais humano e fluido."},
+                {"role": "user", "content": f"Transforme esta lista em uma resposta natural e fluida: {resposta_formatada}"}
+            ]
+        )
+        return response.choices[0].message.content.strip()
+
+    return "Desculpe, não encontrei informações relevantes para sua pergunta."
 
 # Endpoint principal para perguntas
 @app.get("/query")
