@@ -46,7 +46,7 @@ def conectar_bd():
 def get_db_schema():
     global SCHEMA_CACHE
     if SCHEMA_CACHE:
-        return SCHEMA_CACHE  # Retorna o esquema armazenado para evitar consultas repetidas
+        return SCHEMA_CACHE
 
     conn = conectar_bd()
     if conn is None:
@@ -62,30 +62,13 @@ def get_db_schema():
 
     rows = cursor.fetchall()
     schema_info = ""
-    current_table = None
-    table_columns = {}
-
     for row in rows:
-        table = row[0]
-        column = row[1]
-        if table != current_table:
-            schema_info += f'\nTabela: ortocenter."{table}"\n'
-            current_table = table
-        schema_info += f' - "{column}" ({row[2]})\n'
-        table_columns.setdefault(table, []).append(column)
+        table, column, data_type = row
+        schema_info += f'Tabela: ortocenter."{table}" - "{column}" ({data_type})\n'
 
-    SCHEMA_CACHE = schema_info  # Atualiza o cache
+    SCHEMA_CACHE = schema_info
     conn.close()
     return schema_info
-
-# Validar se a tabela e as colunas geradas pela IA existem no banco
-def validar_sql_query(sql_query):
-    schema = get_db_schema()
-    tabelas = re.findall(r'ortocenter\."(\w+)"', sql_query)
-
-    for tabela in tabelas:
-        if f'ortocenter."{tabela}"' not in schema:
-            raise HTTPException(status_code=400, detail=f"Tabela '{tabela}' não encontrada no banco de dados.")
 
 # Identificar datas no input
 def extrair_datas(pergunta):
@@ -114,16 +97,8 @@ def extrair_datas(pergunta):
 
     return None, None
 
-
 # Gerar SQL com IA baseada no esquema do banco (correção de datas)
 def generate_sql_query(pergunta, schema):
-    data_inicio, data_fim = extrair_datas(pergunta)
-
-    if data_inicio and data_fim:
-        # Garante que o último dia seja incluído completamente até 23:59:59
-        data_fim = f"{data_fim} 23:59:59"
-        pergunta += f" (Considerando o intervalo de datas: {data_inicio} até {data_fim})"
-
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -142,10 +117,7 @@ def generate_sql_query(pergunta, schema):
     sql_query = re.sub(r"```sql|```", "", sql_query).strip()
     sql_query = re.sub(r'(\bortocenter\.\b)(\w+)', r'\1"\2"', sql_query)
 
-    validar_sql_query(sql_query)  # Validação da query antes de executar
-
     return sql_query
-
 
 # Executar a query gerada
 def execute_sql_query(query):
@@ -163,39 +135,38 @@ def execute_sql_query(query):
         logging.error(f"Erro ao executar a consulta SQL: {str(e)}")
         return "Erro ao executar a consulta."
 
-# Transformar o resultado SQL em resposta curta
-def interpret_results(results):
+# Criar respostas mais personalizadas e amigáveis
+def generate_friendly_response(results, pergunta):
     if isinstance(results, list) and len(results) == 1 and len(results[0]) == 1:
-        return str(results[0][0])  # Retorna apenas o número diretamente
+        valor = str(results[0][0])
+
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Você é um assistente amigável e informativo."},
+                {"role": "user", "content": f"A resposta para '{pergunta}' é {valor}. Crie uma resposta natural e amigável baseada nisso."}
+            ]
+        )
+        return response.choices[0].message.content.strip()
 
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
     response = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "Se for um número, retorne apenas o número. Caso contrário, explique resumidamente."},
-            {"role": "user", "content": f"Os resultados SQL foram: {results}. Resuma a resposta da melhor forma possível."}
+            {"role": "system", "content": "Você é um assistente amigável e informativo."},
+            {"role": "user", "content": f"Os resultados SQL foram: {results}. Resuma a resposta de forma natural e interativa."}
         ]
     )
     return response.choices[0].message.content.strip()
 
-# Detectar idioma da pergunta
-def detectar_idioma(pergunta):
-    try:
-        return detect(pergunta)
-    except:
-        return "pt"  # Padrão para português
-
 # Endpoint principal para perguntas
 @app.get("/query")
 def executar_consulta(pergunta: str = Query(..., description="Pergunta em linguagem natural")):
-    idioma = detectar_idioma(pergunta)
-    if idioma != "pt":
-        raise HTTPException(status_code=400, detail="Apenas perguntas em português são suportadas no momento.")
-
     schema = get_db_schema()
     sql_query = generate_sql_query(pergunta, schema)
     results = execute_sql_query(sql_query)
-    resposta = interpret_results(results)
+    resposta = generate_friendly_response(results, pergunta)
     return {"resposta": resposta}
 
 # Endpoint de teste
