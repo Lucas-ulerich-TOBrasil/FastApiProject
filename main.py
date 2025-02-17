@@ -88,15 +88,12 @@ def validar_sql_query(sql_query):
 
 
 # Função para corrigir erros comuns na query gerada
-import re
-
-
-import re
-
-import re
 
 def corrigir_query(sql_query):
     sql_query = sql_query.strip()
+
+    # Remover escapes de barras invertidas antes de aspas
+    sql_query = sql_query.replace('\\"', '"')
 
     # Remover marcações extras do ChatGPT
     sql_query = sql_query.replace("```sql", "").replace("```", "")
@@ -105,14 +102,31 @@ def corrigir_query(sql_query):
     sql_query = re.sub(r'\bortocenter\.ortocenter\.', 'ortocenter.', sql_query, flags=re.IGNORECASE)
     sql_query = re.sub(r'FROM\s+"?ortocenter"?"?\."?ortocenter"?"?\.', 'FROM ortocenter.', sql_query, flags=re.IGNORECASE)
 
-    # Corrigir problemas com aspas duplas e invertidas
-    sql_query = sql_query.replace('\\"', '"').replace("\\'", "'").replace("\n", " ")
-
-    # Ajustar sintaxe do BETWEEN para PostgreSQL (removendo escapes desnecessários)
-    sql_query = re.sub(r"BETWEEN TIMESTAMP '\\(.*?)\\' AND TIMESTAMP '\\(.*?)\\'",
-                       r"BETWEEN '\1' AND '\2'", sql_query, flags=re.IGNORECASE)
-
     return sql_query
+
+def generate_friendly_response(results, pergunta, query_sql):
+    if isinstance(results, list) and len(results) == 1 and len(results[0]) == 1:
+        valor = str(results[0][0])
+
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Você é um assistente amigável e profissional. Responda de forma clara e simpática, sem exageros, como um atendimento atencioso e direto."},
+                {"role": "user", "content": f"A resposta para '{pergunta}' é {valor}. Gere uma resposta natural, amigável e objetiva, sem exageros."}
+            ]
+        )
+        return response.choices[0].message.content.strip(), query_sql
+
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "Você é um assistente amigável e profissional. Responda de forma clara e simpática, sem exageros, como um atendimento atencioso e direto."},
+            {"role": "user", "content": f"Os resultados SQL foram: {results}. Crie uma resposta natural e amigável, sem exageros, baseada nesses dados."}
+        ]
+    )
+    return response.choices[0].message.content.strip(), query_sql
 
 
 # Gerar SQL com IA baseada no esquema do banco
@@ -196,16 +210,12 @@ def executar_consulta(pergunta: str = Query(..., description="Pergunta em lingua
             "query_sql": results["query_sql"]
         }
 
-    if isinstance(results, list) and results and results[0] and isinstance(results[0][0], (int, float)):
-        resposta = f"Temos {results[0][0]} registros correspondentes para sua busca."
-    else:
-        resposta = "Não encontrei registros correspondentes, mas estou aqui para ajudar!"
+    resposta, query_sql = generate_friendly_response(results, pergunta, sql_query)
 
     return {
         "resposta": resposta,
-        "query_sql": sql_query
+        "query_sql": query_sql
     }
-
 
 # Endpoint de teste
 @app.get("/")
