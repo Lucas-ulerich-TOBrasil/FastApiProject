@@ -26,6 +26,7 @@ app = FastAPI(title="NL2SQL API")
 # Cache para esquema do banco
 SCHEMA_CACHE = None
 
+
 # Conectar ao PostgreSQL
 def conectar_bd():
     try:
@@ -41,6 +42,7 @@ def conectar_bd():
     except Exception as e:
         logging.error(f"Erro ao conectar ao banco: {e}")
         raise HTTPException(status_code=500, detail="Erro ao conectar ao banco de dados")
+
 
 # Obter esquema do banco PostgreSQL (com cache)
 def get_db_schema():
@@ -70,61 +72,102 @@ def get_db_schema():
     conn.close()
     return schema_info
 
-# Identificar datas no input
-def extrair_datas(pergunta):
-    hoje = datetime.today()
-    inicio_semana = hoje - timedelta(days=hoje.weekday())  # Segunda-feira
-    fim_semana = inicio_semana + timedelta(days=6)  # Domingo
 
-    if "essa semana" in pergunta.lower():
-        return inicio_semana.strftime("%Y-%m-%d"), fim_semana.strftime("%Y-%m-%d")
+# Função para validar a query gerada
+def validar_sql_query(sql_query):
+    if not sql_query.strip():
+        raise HTTPException(status_code=400, detail="A query gerada está vazia.")
 
-    match = re.findall(r"(\d{1,2})\s*de\s*(janeiro|fevereiro|março|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)", pergunta, re.IGNORECASE)
-    if match:
-        meses = {
-            "janeiro": 1, "fevereiro": 2, "março": 3, "abril": 4, "maio": 5, "junho": 6,
-            "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12
-        }
-        datas = []
-        for dia, mes_nome in match:
-            mes = meses.get(mes_nome.lower())
-            datas.append(f"{hoje.year}-{mes:02d}-{int(dia):02d}")
+    if "SELECT" not in sql_query.upper():
+        raise HTTPException(status_code=400, detail="A query gerada não é uma consulta válida.")
 
-        if len(datas) == 2:
-            return datas[0], datas[1]
-        elif len(datas) == 1:
-            return datas[0], datas[0]
+    if "FROM ortocenter" not in sql_query:
+        raise HTTPException(status_code=400, detail="A query não faz referência ao schema correto.")
 
-    return None, None
+    return True
 
-# Gerar SQL com IA baseada no esquema do banco (correção de datas)
+
+# Função para corrigir erros comuns na query gerada
+import re
+
+
+import re
+
+import re
+
+def corrigir_query(sql_query):
+    sql_query = sql_query.strip()
+
+    # Remover marcações extras do ChatGPT
+    sql_query = sql_query.replace("```sql", "").replace("```", "")
+
+    # Remover referências duplicadas ao schema ortocenter
+    sql_query = re.sub(r'\bortocenter\.ortocenter\.', 'ortocenter.', sql_query, flags=re.IGNORECASE)
+    sql_query = re.sub(r'FROM\s+"?ortocenter"?"?\."?ortocenter"?"?\.', 'FROM ortocenter.', sql_query, flags=re.IGNORECASE)
+
+    # Corrigir problemas com aspas duplas e invertidas
+    sql_query = sql_query.replace('\\"', '"').replace("\\'", "'").replace("\n", " ")
+
+    # Ajustar sintaxe do BETWEEN para PostgreSQL (removendo escapes desnecessários)
+    sql_query = re.sub(r"BETWEEN TIMESTAMP '\\(.*?)\\' AND TIMESTAMP '\\(.*?)\\'",
+                       r"BETWEEN '\1' AND '\2'", sql_query, flags=re.IGNORECASE)
+
+    return sql_query
+
+
+# Gerar SQL com IA baseada no esquema do banco
 def generate_sql_query(pergunta, schema):
+    # Obtém o ano atual
+    ano_atual = datetime.today().year
+
+    # Dicionário de meses para garantir que o ano atual seja usado
+    meses = {
+        "janeiro": "01", "fevereiro": "02", "março": "03", "abril": "04", "maio": "05", "junho": "06",
+        "julho": "07", "agosto": "08", "setembro": "09", "outubro": "10", "novembro": "11", "dezembro": "12"
+    }
+
+    # Verifica se a pergunta menciona um mês específico
+    for mes_nome, mes_num in meses.items():
+        if f"mês de {mes_nome}" in pergunta.lower():
+            return f""" 
+            SELECT COUNT(*) 
+            FROM ortocenter."AGENDA" 
+            WHERE "dataagendamento" >= TIMESTAMP '{ano_atual}-{mes_num}-01 00:00:00' 
+            AND "dataagendamento" <= TIMESTAMP '{ano_atual}-{mes_num}-28 23:59:59';
+            """
+
+    # Se a pergunta for sobre "último mês", calcular corretamente
+    if "último mês" in pergunta.lower():
+        return f""" 
+        SELECT COUNT(*) 
+        FROM ortocenter."AGENDA" 
+        WHERE "dataagendamento" >= date_trunc('month', current_date - interval '1 month') 
+        AND "dataagendamento" <= date_trunc('month', current_date) - interval '1 second';
+        """
+
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system",
-             "content": """Você é um assistente SQL para PostgreSQL. Gere apenas consultas SQL válidas.
+             "content": f"""Você é um assistente SQL para PostgreSQL. Gere apenas consultas SQL válidas.
              Sempre use o schema 'ortocenter' antes dos nomes das tabelas e envolva os nomes das tabelas em ASPAS DUPLAS.
              Se a pergunta envolver contagem, use COUNT(*).
-             Para consultas de datas, utilize a coluna "dataagendamento" e SEMPRE inclua o dia final até '23:59:59'."""},
+             Para consultas de datas, utilize a coluna "dataagendamento" e SEMPRE inclua o ano {ano_atual} e o dia final até '23:59:59.999'.
+             Sempre escreva queries SQL válidas, evite erros de sintaxe e mantenha a compatibilidade com PostgreSQL."""},
             {"role": "user",
              "content": f"Aqui está o esquema do banco:\n{schema}\n\nTransforme a seguinte solicitação em SQL: {pergunta}"}
         ]
     )
 
     sql_query = response.choices[0].message.content.strip()
-    sql_query = re.sub(r"```sql|```", "", sql_query).strip()
-    sql_query = re.sub(r'(\bortocenter\.\b)(\w+)', r'\1"\2"', sql_query)
+    sql_query = corrigir_query(sql_query)  # Aplica as correções automáticas
 
     return sql_query
 
 # Executar a query gerada
 def execute_sql_query(query):
     conn = conectar_bd()
-    if conn is None:
-        return "Erro ao conectar ao banco."
-
     cursor = conn.cursor()
     try:
         cursor.execute(query)
@@ -133,48 +176,36 @@ def execute_sql_query(query):
         return rows
     except Exception as e:
         logging.error(f"Erro ao executar a consulta SQL: {str(e)}")
-        return "Erro ao executar a consulta."
+        return {"erro": str(e), "query_sql": query}
 
-# Criar respostas mais personalizadas e amigáveis
-def generate_friendly_response(results, pergunta):
-    if isinstance(results, list) and len(results) == 1 and len(results[0]) == 1:
-        valor = str(results[0][0])
-
-        client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "Você é um assistente amigável e informativo. Responda de forma natural, sem mencionar SQL, banco de dados, consultas ou listas pontuadas. Responda de forma fluida e conversacional."},
-                {"role": "user", "content": f"A resposta para '{pergunta}' é {valor}. Gere uma resposta natural e amigável, sem formato de lista."}
-            ]
-        )
-        return response.choices[0].message.content.strip()
-
-    # Se for uma lista de itens, formatamos como uma resposta mais fluida
-    if isinstance(results, list) and len(results) > 0:
-        valores = [str(row[0]) for row in results if len(row) > 0]
-        resposta_formatada = ", ".join(valores)
-
-        client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "Você é um assistente amigável e informativo. Responda de forma natural, sem mencionar SQL, banco de dados ou listas pontuadas. Dê um tom mais humano e fluido."},
-                {"role": "user", "content": f"Transforme esta lista em uma resposta natural e fluida: {resposta_formatada}"}
-            ]
-        )
-        return response.choices[0].message.content.strip()
-
-    return "Desculpe, não encontrei informações relevantes para sua pergunta."
 
 # Endpoint principal para perguntas
 @app.get("/query")
 def executar_consulta(pergunta: str = Query(..., description="Pergunta em linguagem natural")):
     schema = get_db_schema()
     sql_query = generate_sql_query(pergunta, schema)
+
+    # Valida a query antes de executar
+    validar_sql_query(sql_query)
+
     results = execute_sql_query(sql_query)
-    resposta = generate_friendly_response(results, pergunta)
-    return {"resposta": resposta}
+
+    if "erro" in results:
+        return {
+            "erro": results["erro"],
+            "query_sql": results["query_sql"]
+        }
+
+    if isinstance(results, list) and results and results[0] and isinstance(results[0][0], (int, float)):
+        resposta = f"Temos {results[0][0]} registros correspondentes para sua busca."
+    else:
+        resposta = "Não encontrei registros correspondentes, mas estou aqui para ajudar!"
+
+    return {
+        "resposta": resposta,
+        "query_sql": sql_query
+    }
+
 
 # Endpoint de teste
 @app.get("/")
